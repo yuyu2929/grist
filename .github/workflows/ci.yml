@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (py ${{ matrix.python }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: '3.9' }
+          - { os: ubuntu-latest, python: '3.10' }
+          - { os: ubuntu-latest, python: '3.11' }
+          - { os: ubuntu-latest, python: '3.12' }
+          - { os: ubuntu-latest, python: '3.13' }
+          - { os: windows-latest, python: '3.12' }
+          - { os: macos-latest, python: '3.12' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # 1. The library claims zero dependencies: prove the suite runs with none.
+      - name: tests with no third-party packages installed
+        run: python tests/run_all.py
+
+      # 2. Then install the oracle and run the exactness tests for real.
+      - name: install test extras
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+      - name: tests with the shapely oracle
+        run: python tests/run_all.py
+
+  cli:
+    name: cli walkthrough
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+      - name: bake -> stats -> query -> export -> update -> diff -> verify
+        run: |
+          set -eux
+          grist --help > /dev/null
+          grist bake demo/city.geojson -o city.grist --cell-count 256
+          grist stats city.grist
+          grist verify city.grist
+          grist query city.grist 12.5 47.3
+          grist query city.grist 12.5 47.3 --level 2
+          grist export city.grist out.pgm --format pgm
+          grist export city.grist out.csv --format csv
+          grist export city.grist out.json --format dense
+          test -s city.grist && test -s out.pgm && test -s out.csv && test -s out.json
+          grist update city.grist -o city2.grist --remove 0
+          grist diff city.grist city2.grist
+          grist verify city2.grist
+      - name: the container is deterministic
+        run: |
+          set -eux
+          grist bake demo/city.geojson -o a.grist --cell-count 256 > /dev/null
+          grist bake demo/city.geojson -o b.grist --cell-count 256 > /dev/null
+          cmp a.grist b.grist
+      - name: corrupt input is rejected, not silently accepted
+        run: |
+          set +e
+          head -c 200 city.grist > broken.grist
+          grist verify broken.grist
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+      - name: bench (quick)
+        run: python bench/bench.py --quick
+
+  package:
+    name: package integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip build twine
+      - name: build sdist and wheel
+        run: python -m build
+      - name: twine check
+        run: python -m twine check dist/*
+      - name: install the wheel in a clean venv (no deps) and use it
+        run: |
+          set -eux
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/python -c "import grist; print('grist', grist.__version__)"
+          /tmp/venv/bin/grist --help > /dev/null
+          /tmp/venv/bin/python -m grist.cli bake demo/city.geojson -o /tmp/w.grist --cell-count 64
+          /tmp/venv/bin/grist verify /tmp/w.grist
+      - name: license files present
+        run: |
+          test -s LICENSE
+          grep -q "MIT License" LICENSE
+      - name: no generated artifacts tracked
+        run: |
+          if git ls-files | grep -Eq '\.grist$|\.pgm$|__pycache__'; then
+            echo "generated artifacts are tracked"; exit 1
+          fi
+          echo clean

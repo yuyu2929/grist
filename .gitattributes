@@ -1,0 +1,14 @@
+# Keep LF in the repository. The package is pure Python and CI runs it on
+# Linux; a Windows checkout must not rewrite line endings (the CLI would still
+# work, but diffs and the byte-identical guarantees in the docs get noisy).
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.geojson text eol=lf
+
+*.grist binary
+*.pgm binary
